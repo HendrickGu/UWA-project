@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# Check if the number of arguments is correct
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <textfile> <data>" > /dev/stderr
+    exit 1
+fi
+
+# Check the file exist and it has contents
+if [[ ! -s $1 ]]; then
+    echo "The file $1 does not exist or has zero lenth" > /dev/stderr
+    exit 1
+fi
+
+command=$2
+
+case $command in
+    maxstate)
+    # The state with one of the largest number of incidents and the corresponding count
+        state=$(tail -n +2 $1 | cut -d$'\t' -f2 | sort | uniq -c | sort -nr | head -n 1| tr -s ' ' | cut -d ' ' -f3)
+        state_count=$(tail -n +2 $1 | cut -d$'\t' -f2 | grep -w "$state" | wc -l)
+        echo "State with greatest number of incidents is: "$state" with count "$state_count""
+        ;;
+    maxyear)
+    # The year with the one of the greatest number of incidences across all the states and the corresponding count
+        year=$(tail -n +2 $1 | cut -d$'\t' -f8 | sort |uniq -c | sort -nr | head -n 1 | tr -s ' ' | cut -d ' ' -f3)
+        year_count=$(tail -n +2 $1 | cut -d$'\t' -f8 $1 | grep -w "$year" | wc -l)
+        echo "Year with greatest number of incidents is: "$year" with count "$year_count""
+        ;;
+    [A-Za-z][A-Za-z])
+    # One of the years with the maximum number of incidents in the specified state, and the corresponding count
+        specific_state=$(cut -d$'\t' -f2 $1 | grep -iw "$command")
+        # If the input is not a two-letter state code that is present in the file, then an error is reported
+        if [[ $? != 0 ]]; then
+            echo "Error: State $command does not exist in $1"
+            exit 1
+        fi
+        specific_state_year=$(tail -n +2 $1 | grep -w "$specific_state" | cut -d$'\t' -f8 | sort | uniq -c | sort -nr | head -n 1 | tr -s ' ' | cut -d ' ' -f3)
+        specific_state_year_count=$(tail -n +2 $1 | grep -w "$specific_state" | cut -d$'\t' -f8 | grep -w "$specific_state_year" | wc -l)
+        echo "Year with greatest number of incidents for "$command" is in "$specific_state_year" with count "$specific_state_year_count""
+        ;;
+    [0-9][0-9][0-9][0-9])
+    # One of the states with the maximum number of events for the year specified, and the corresponding count
+        specific_year=$(cut -d$'\t' -f8 $1 | grep -w "$command")
+        # If the input is not one of the four-digit years available in the file, then an error is reported
+        if [[ $? != 0 ]]; then
+            echo "Error: Year $command does not exist in $1"
+            exit 1
+        fi
+        specific_year_state=$(tail -n +2 $1 | grep -w "$specific_year" | cut -d$'\t' -f2 | sort | uniq -c | sort -nr | head -n 1 | tr -s ' ' | cut -d ' ' -f3)
+        specific_year_state_count=$(tail -n +2 $1 | grep -w "$specific_year" | cut -d$'\t' -f2 | grep -w "$specific_year_state" | wc -l)
+        echo "State with greatest number of incidents for "$command" is in "$specific_year_state" with count "$specific_year_state_count""
+        ;;
+    max*)
+    # If the input is a word starting with max, but not maxstate or maxyear, then an error is reported
+        echo "The max commands are either maxstate or maxyear"
+        exit 1
+        ;;
+    *)
+    # If the input is not all of the above, then an error is reported
+        echo "The commands are not maxstate or maxyear or a two letter state code or a four digit year"
+        exit 1
+    esac
+
+

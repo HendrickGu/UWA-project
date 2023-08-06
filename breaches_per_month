@@ -1,0 +1,53 @@
+#!/bin/bash
+#check if number of argument is corret
+if [ $# -ne 1 ]
+then
+    echo "Usage: $0 <tsv_file>"
+exit 1
+fi
+
+filename=$1         
+
+#check if the file exist and have content
+if [ ! -s $1 ]
+then
+    echo "$1 is not a file or has zero length"
+exit 1
+fi
+#array of month names
+month_count=("Jan" "Feb" "Mar" "Apr" "May" "Jun" "Jul" "Aug" "Sep" "Oct" "Nov" "Dec")
+
+#associations arrays
+declare -A counts
+declare -A deviations
+
+awk -F'\t' -v month_count="${month_count[*]}" '
+BEGIN {split(month_count,months," ");for (i in months) {counts[months[i]] = 0}}
+NR>1 {month = months[$6];counts[month]++}
+END {
+n=asort(counts,sorted_counts)
+    
+#calculate median need to consider n is even or odd
+if (n % 2 == 0) {median = (sorted_counts[int(n/2)] + sorted_counts[int((n/2)+1)])/2}
+else {median = (sorted_counts[int((n+1)/2)])}
+
+for (i = 1; i <= n; i++) {
+    month = months[i]
+    deviations[month] = counts[month] - median
+    deviations[month] = sqrt(deviations[month] * deviations[month])}
+
+m = asort(deviations,sorted_deviations)
+
+#calculate mad need to consider m is even or odd
+if (m % 2 == 0) {mad = (sorted_deviations[int(m/2)] + sorted_deviations[int((m/2)+1)])/2}
+else {mad = (sorted_deviations[int((m+1)/2)])}
+print "Median:"median
+print "Mad:"mad
+for (i = 1; i <= n; i++) {
+    month = months[i]
+    indicator = ""
+    if (counts[month] <= median - mad) {
+        indicator = "--"}
+    else if (counts[month] >= median + mad) {
+        indicator = "++"}
+    printf "%s\t%d\t%s\n",month,counts[month],indicator}}' "$filename"

@@ -1,0 +1,45 @@
+#!/bin/bash
+#check if number of argument is correct
+
+if [ $# -ne 1 ]
+then
+    echo "Usage: $0 <tsv_file>" 
+    exit 1
+fi
+
+filename=$1
+
+#check if the file exist and have contents
+if [ ! -s $1 ]
+then
+    echo "$1 is not a file or has zero length" 
+    exit 1
+fi
+
+#first line of the original file and change the penultimate two fields to month and year
+awk -F '\t' '{if (NR == 1) {OFS="\t";$NF="Year"; $(NF-1)="Month"}
+else{split($4,a,"-"); split(a[1],b,"/");
+#date is invalid if month > 12 or days >31
+if (b[1] > 12 || b[2] > 31) next;
+
+#check if individuals affevted field only contains numeric values
+if ($3 !~ /^[0-9]+$/) next;
+
+#add a month column (containing numbers 1..12) and a year field 
+if(length(b[3])==2) {
+    if (b[3] < 23)
+        b[3]="20"b[3]
+    else
+        b[3]="19"b[3]
+}
+#remove 0 if there is "0" in the month
+$6=(b[1] ~ /^0/) ? substr(b[1],2) : b[1]
+$7=b[3]
+
+#remove everything in field after the first comma or slash in type of breach column    
+sub(/[,\/].*/,"",$5)}
+#remove spaces in the end of line
+gsub(/ /,"",$NF)
+print}' $filename 
+
+
