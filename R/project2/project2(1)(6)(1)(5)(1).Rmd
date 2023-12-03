@@ -1,0 +1,1044 @@
+---
+title: "CITS4009 - Project2"
+author: "Jiaheng GU(23925667) and Shijun SHAO(23926903)"
+output: html_document
+---
+
+
+### Introduction
+
+The project is to build classification and clustering models based on the Youtube dataset. The data set can be obtained from <https://www.kaggle.com/datasets/nelgiriyewithana/global-youtube-statistics-2023?resource=download>
+
+This dataset gives information about subscriber counts, video views, upload frequency, country of origin, earnings, and more.
+
+
+Load libraries
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(stringr)
+library(forcats)
+library('ROCR')
+library(ggplot2)
+library(gridExtra)
+library('rpart')
+library(pROC)
+```
+
+Load dataset and observe the variables
+
+```{r}
+data.path <- 'D:/cits4009/youtube_UTF_8.csv'
+youtube <- read.csv(data.path)
+str(youtube)
+```
+
+We can see that the data is not consistent and there are some missing values.
+
+In addidition, there are some variables that not relevant to our analysis, so in the following steps we need to deal with the irrelevant variable.
+
+## Data cleaning and transformation
+```{r}
+# 将所有为'nan'或'NAN'的值替换为NA
+youtube[youtube == "nan" | youtube == "NAN"] <- NA
+
+# 删除重复行
+youtube <- youtube[!duplicated(youtube), ]
+
+# 将0替换为NA
+youtube <- mutate_all(youtube, ~replace(., . == 0, NA))
+
+# 过滤掉那些含有超过60%的NA的行
+youtube <- youtube %>%
+  filter(rowSums(is.na(.)) / ncol(.) <= 0.6)
+
+# 将NA值替换为mean或'Missing'
+num_cols <- c("subscribers", "video.views", "uploads", "created_year", 
+              "Gross.tertiary.education.enrollment....", "Population", 
+              "Unemployment.rate", "Urban_population", "Latitude", "Longitude", "lowest_monthly_earnings", "highest_monthly_earnings", "lowest_yearly_earnings", "highest_yearly_earnings")
+
+chr_cols <- c("category", "Country", "channel_type", "created_month")
+
+for (col in num_cols) {
+  youtube[[col]][is.na(youtube[[col]])] <- mean(youtube[[col]], na.rm = TRUE)
+}
+
+for (col in chr_cols) {
+  youtube[[col]][is.na(youtube[[col]])] <- "Missing"
+}
+for (col in chr_cols) {
+  youtube[[col]] <- as.factor(youtube[[col]])
+}
+
+# 删除created_month列中值为"Missing"的行
+youtube <- youtube[!(youtube$created_month == "Missing"), ]
+
+# 过滤掉不合理的年份
+youtube <- youtube %>%
+  filter(`created_year` >= 2005)
+```
+
+将created_month列变为数值类型
+```{r}
+# 创建一个映射表，将月份文本映射到数值
+month_mapping <- data.frame(
+  Month = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+  created_Month = 1:12
+)
+
+# 使用left_join将月份映射到youtube数据框
+youtube <- youtube %>%
+  left_join(month_mapping, by = c(created_month = "Month")) %>%
+  mutate(created_month = coalesce(created_Month, median(created_Month, na.rm = TRUE))) %>%
+  select(-created_Month) # 删除新建的临时列
+
+# coalesce函数用于将NA值替换为指定的值，这里是中位数
+# median(created_Month, na.rm = TRUE)计算created_Month列的中位数，na.rm = TRUE表示忽略NA值
+
+# 最终结果中NA值已被替换为中位数
+
+```
+
+
+### Part1: Classification
+
+
+## 1.1 Selecting the response(target) variable
+
+Our chosen target variable is the classification of income levels into "high" or "low". However, the dataset doesn't explicitly provide this categorization. To address this, we evaluate whether a channel's highest yearly earnings exceed the median of the highest yearly earnings across all channels. Channels surpassing this threshold are deemed to have "high" income, while the rest fall under the "low" income category. The rationale for this choice is rooted in the evolving landscape of digital content consumption.
+
+The digital revolution has accelerated the growth of self-media platforms, with platforms like YouTube standing out prominently. As audiences grow, content creators have increasingly diverse earning potential. In such an environment of varied financial outcomes, determining what constitutes "high" or "low" income necessitates a robust and representative measure. The median serves this purpose adeptly. Positioned at the center of a dataset, the median inherently filters out the influence of outliers or skewed data. This property ensures its relevance in datasets where extremes can significantly skew the mean.
+
+Analyzing the available earnings data, we observed that the monthly earnings columns, both "lowest" and "highest," tend to capture transient fluctuations, potentially influenced by seasonal trends or short-term events. They don't necessarily reflect a channel's consistent annual performance. While "lowest yearly earnings" provides a more stable view, it primarily focuses on a channel's performance during potentially lean periods. For a holistic and optimistic perspective, "highest yearly earnings" becomes our column of choice. It encapsulates the best a content creator can achieve in a year, illustrating their potential in an ever-evolving digital media 
+
+In summary, with the continuous rise in video consumption and the dynamic nature of self-media, utilizing the median value of "highest yearly earnings" facilitates a well-balanced and optimistic categorization of YouTube channels based on their income potential.
+
+So we created a tagert variable and the labels we assigned to this variable are low-earning and high-earning.(改原因,没再用median了)
+```{r}
+# 按highest_yearly_earnings对所有频道进行排名
+youtube <- youtube %>% 
+  arrange(desc(highest_yearly_earnings)) %>%
+  mutate(rank = row_number())
+
+# 根据排名将前40%分类为高收入，后60%分类为低收入
+n_high_earning <- floor(0.4 * nrow(youtube))
+youtube <- youtube %>%
+  mutate(earning_category = ifelse(rank <= n_high_earning, 1, 0)) %>%
+  select(-rank)  # 移除排名列
+
+str(youtube$earning_category)
+```
+
+
+## 1.2 Selecting variables
+In our quest to predict the income categorization of YouTube channels, we've identified specific features from the dataset based on their potential relevance and influence on the outcome:
+
+Subscribers: Subscriber count often correlates with earnings; more subscribers typically denote a larger viewership, potentially leading to increased ad revenue.
+Video views: Directly related to earnings, as views correlate with ad impressions and revenue generation.
+Category: Channel genre or theme might influence ad rates and viewer engagement.
+Uploads: A reflection of channel activity and, potentially, its popularity.
+Country: Different regions may have varying ad rates and viewer purchasing power.
+Channel type: Channel categories might influence ad rates and the type of engagement from viewers.
+Created year: Offers insights into the age of the channel. Older channels might have established a more solid audience base, possibly correlating with higher earnings.
+Created month: Reveals potential seasonal patterns in channel creation. Certain months may favor the inception and growth of new channels, influencing their earnings trajectory.
+Gross tertiary education enrollment (%): Can relate to viewer engagement and ad-click rates.
+Population: Larger population could signify a more significant viewer base.
+Unemployment rate: Might be linked to the amount of online time and viewer engagement.
+Urban population: Relates to the target market for many advertisers.
+Latitude and Longitude: The inclusion of latitude and longitude serves to capture regional nuances in earnings. Even within the same country, there can be significant income variations based on geographical factors. These coordinates, while broad, allow our model to recognize and potentially leverage these geographical variations.
+
+Columns Not Selected and Justifications:
+Rank, Title and Youtuber:These are unique identifiers and, therefore, unlikely to provide generalizable patterns for our predictive model.
+Abbreviation: This is essentially a redundant feature if we already include "Country."
+Video views for the last 30 days and Subscribers for the last 30 days: While these columns reflect recent trends, they might introduce noise due to their short-term nature. They can capture transient spikes in views or subscribers, which might not persist in the long term. While recent trends can be insightful, for a robust model that predicts long-term income classification, these might be less stable indicators.
+Created date: While providing exact creation dates, it may not add significant predictive power after accounting for month and year, and could introduce unnecessary complexity.
+other earnings: Based on the calculation, we find that the correlations are high so they are removed.
+
+```{r}
+
+#(写原因) 计算 lowest_monthly_earnings 与 highest_yearly_earnings 的相关性
+cor1 <- cor(youtube$lowest_monthly_earnings, youtube$highest_yearly_earnings, use = "complete.obs")
+
+# 计算 highest_monthly_earnings 与 highest_yearly_earnings 的相关性
+cor2 <- cor(youtube$highest_monthly_earnings, youtube$highest_yearly_earnings, use = "complete.obs")
+
+# 计算 lowest_yearly_earnings 与 highest_yearly_earnings 的相关性
+cor3 <- cor(youtube$lowest_yearly_earnings, youtube$highest_yearly_earnings, use = "complete.obs")
+
+# 打印相关性系数
+cat("Correlation between lowest_monthly_earnings and highest_yearly_earnings: ", cor1, "\n")
+cat("Correlation between highest_monthly_earnings and highest_yearly_earnings:", cor2, "\n")
+cat("Correlation between lowest_yearly_earnings and highest_yearly_earnings:  ", cor3, "\n")
+
+```
+
+
+
+```{r}
+# 选择特定列作为特征变量和响应变量
+youtube <- youtube %>%
+  select(subscribers, video.views, category, uploads, Country, channel_type, created_year, created_month,
+         `Gross.tertiary.education.enrollment....`, Population, `Unemployment.rate`, 
+         Urban_population, Latitude, Longitude, earning_category)
+outcome <- "earning_category"
+pos.label <- "1"
+```
+
+
+##The Null Model:
+Firstly, we check the null model which provides a simple baseline to describe the average value or distribution of the response variable in the absence of any predictor variables or features. 
+```{r}
+# 步骤 1: 创建响应变量 earning_category
+# 假设你已经将数据分类到 high-earning 和 low-earning，并将结果存储在 earning_category 列中
+
+# 步骤 2: 拟合 Null Model
+
+
+# 步骤 3: 计算 Null Model 预测结果
+Npos <- sum(youtube[,"earning_category"] == 1)
+pred_Null <- Npos / nrow(youtube)
+
+# 输出 Null Model 的结果
+cat("Proportion of high-earning in the data:", pred_Null)
+
+```
+
+## Splitting the data
+Splitting the data into training and test sets is crucial for assessing model performance, preventing overfitting, tuning hyperparameters, selecting the best model, and ensuring that our model can generalize to new data effectively.
+```{r}
+#youtube$earning_category = factor(youtube$earning_category)
+```
+
+We split the data into a training set and a test set(90,10)
+```{r}
+set.seed(4009)  # 确保可重复性
+vars = setdiff(colnames(youtube), c("earning_category","group"))
+
+#将数据拆分为类别变量和数值变量
+catVars = vars[sapply(youtube[, vars], class) %in%
+c('character','factor')]
+
+
+numericVars = vars[sapply(youtube[, vars], class) %in%
+c('numeric','integer')]
+
+
+youtube$group = runif(dim(youtube)[1])
+trainingSet = subset(youtube, group<= 0.9)
+test_set = subset(youtube, group>0.9)
+```
+
+类别变量
+```{r}
+catVars
+```
+数值变量
+```{r}
+numericVars
+```
+Now, we further split the training set into a train set and a calibration set(80,20)
+```{r}
+calib.set = rbinom(dim(trainingSet)[1], size=1, prob=0.2)>0
+calibration_set = subset(trainingSet, calib.set)
+train_set = subset(trainingSet, !calib.set)
+```
+
+## 单变量模型
+
+First of all, we observe one of the single variable as an example
+```{r}
+outcome <- "earning_category"
+pos = '1'
+
+table.1 = table(trainingSet[,'channel_type'], trainingSet[,outcome], useNA='ifany')
+print(table.1[,2]/(table.1[,1]+table.1[,2]))
+```
+
+
+In this section, we utilized a custom function mkPredC to compute prediction probabilities based on individual categorical variables. This function calculates the proportion of positive cases (e.g., high-earning channels) within each categorical level, and then applies these proportions to the corresponding categorical levels in other datasets.
+
+```{r}
+mkPredC <- function(outCol,varCol,appCol, pos=pos.label) {
+  pPos <- sum(outCol==pos)/length(outCol)
+  naTab <- table(as.factor(outCol[is.na(varCol)]))
+  pPosWna <- (naTab/sum(naTab))[pos]
+  vTab <- table(as.factor(outCol),varCol)
+  pPosWv <- (vTab[pos,]+1.0e-3*pPos)/(colSums(vTab)+1.0e-3)
+  pred <- pPosWv[appCol]
+  pred[is.na(appCol)] <- pPosWna
+  pred[is.na(pred)] <- pPos
+  pred
+}
+```
+Following this, we executed this prediction function for each categorical variable, producing a new column of prediction probabilities. These new prediction probability columns reflect the potential predictive power of each categorical variable.
+```{r}
+# 针对类别变量进行预测概率的计算
+for (v in catVars) {
+  pred_var <- paste('pred', v, sep='')
+  
+  # 计算训练集中的预测概率
+  train_set[, pred_var] <- mkPredC(train_set[, outcome],train_set[, v], train_set[, v])
+  
+  # 计算校准集中的预测概率
+  calibration_set[, pred_var] <- mkPredC(train_set[, outcome], train_set[, v], calibration_set[, v])
+  
+  # 计算测试集中的预测概率
+  test_set[, pred_var] <- mkPredC(train_set[, outcome], train_set[, v], test_set[, v])
+}
+```
+
+Checking some of the results
+
+```{r}
+rows <- c(123,108,98,65,27,19,9)
+calibration_set[rows,c("category","predcategory")]
+```
+From the above results,we can see that the Music observations return the same value and Education observations return the same value.
+
+评估单变量模型(分类)的AUC
+然后，我们使用另一个函数 calcAUC 计算这些单变量预测的 AUC 值。AUC 为我们提供了衡量模型预测性能的一致标准，其中 1 代表完美预测，0.5 代表随机猜测。
+Then, we employed another function calcAUC to compute the AUC values for these single-variable predictions. The AUC provides us with a consistent measure of the predictive performance of our models, where 1 represents perfect prediction and 0.5 denotes random guessing.
+```{r}
+calcAUC <- function(predcol, outcol, pos=pos.label) {
+  perf <- performance(prediction(predcol, outcol==pos),'auc')
+  as.numeric(perf@y.values)
+}
+```
+
+```{r}
+betcatVars = c()
+for (v in catVars) {
+  pred_var <- paste('pred', v, sep='')
+  aucTrain <- calcAUC(train_set[, pred_var], train_set[, outcome])
+  
+  # 仅当训练集AUC大于或等于0.8时才计算校准集AUC并打印结果
+  if (aucTrain >= 0.54) {
+    aucCal <- calcAUC(calibration_set[, pred_var], calibration_set[, outcome])
+    print(sprintf(
+      "%s: trainAUC: %4.3f; calibrationAUC: %4.3f",
+      pred_var, aucTrain, aucCal
+    ))
+    betcatVars = c(betcatVars, v)
+  }
+}
+
+```
+## 10-Fold Cross-Validation
+```{r}
+for (var in betcatVars) {
+aucs <- rep(0,10)
+for (rep in 1:length(aucs)) {
+useForCalRep <- rbinom(n=nrow(trainingSet), size=1, prob=0.1) > 0
+predRep <- mkPredC(trainingSet[!useForCalRep, outcome],
+trainingSet[!useForCalRep, var],
+trainingSet[useForCalRep, var])
+aucs[rep] <- calcAUC(predRep, trainingSet[useForCalRep, outcome])
+}
+print(sprintf("%s: mean: %4.3f; sd: %4.3f", var, mean(aucs), sd(aucs)))
+}
+```
+
+## Double Density plots
+```{r}
+str(factor(train_set[,'channel_type']))
+str(factor(train_set[,'category']))
+str(factor(train_set[,'Country']))
+fig1 <- ggplot(calibration_set) + geom_density(aes(x=predchannel_type, color=as.factor(earning_category)))
+fig2 <- ggplot(calibration_set) + geom_density(aes(x=predcategory, color=as.factor(earning_category)))
+fig3 <- ggplot(calibration_set) + geom_density(aes(x=predCountry, color=as.factor(earning_category)))
+grid.arrange(fig1,fig2,fig3,ncol=1)
+
+```
+在评估基于YouTube数据集的不同特征的预测能力时，我们创建了三个双密度图，分别针对channel_type、category和Country这三个特征。
+1. predchannel_type 密度图分析： 此图显示了基于频道类型进行的预测概率分布。我们可以观察到，对于低收入（earning_category = 0）和高收入（earning_category = 1）的频道，预测概率的分布有所重叠。这表明，仅根据channel_type对收入进行分类存在一定的困难。
+2. predcategory 密度图分析： 与前面的图类似，这里我们看到的是基于频道类别进行的预测概率分布。此图显示，高收入和低收入的频道在预测概率上有明显的分离，尽管还存在一些重叠。这意味着频道的类别可能对预测高收入和低收入的能力有一定的贡献。
+3. predCountry 密度图分析： 对于频道所在的国家，我们看到高收入和低收入的频道的预测概率分布非常接近。这可能表明，国家特征对于区分高收入和低收入的频道可能不是一个很强的预测因子。
+总结： 这三张双密度图为我们提供了一个直观的方式来评估每个特征在预测YouTube频道收入分类上的重要性。显然，单一特征可能不足以准确预测频道的收入类别，需要考虑多个特征的组合。不过，这些图表为我们提供了一个初步的理解，哪些特征可能更有预测价值，以及哪些特征可能需要与其他信息结合起来使用。
+
+In assessing the predictive capabilities of different features derived from the YouTube dataset, we have created three double density plots corresponding to the features: channel_type, category, and Country.
+1. Analysis of the predchannel_type Density Plot: This graph displays the distribution of predicted probabilities based on the channel type. Observationally, there is an overlap in the distribution of prediction probabilities for both low-earning (earning_category = 0) and high-earning (earning_category = 1) channels. This suggests that classifying income solely based on the channel_type poses certain challenges.
+2. Analysis of the predcategory Density Plot: Similar to the previous chart, here we observe the predicted probability distribution based on the category of the channel. The chart suggests that there is a distinct separation in the predicted probabilities for high-earning and low-earning channels, though some overlap still exists. This implies that the category of the channel might offer some contribution to the predictive power in classifying high versus low earnings.
+3. Analysis of the predCountry Density Plot: For the country of the channel's origin, the predicted probability distributions for high-earning and low-earning channels are very close to each other. This might indicate that the country characteristic might not be a strong predictor in differentiating between high and low earning channels.
+Conclusion: These three double density plots offer an intuitive way to assess the importance of each feature in predicting the income classification of YouTube channels. Clearly, a singular feature might not be sufficient for accurately predicting the income category of channels, and a combination of features may be necessary. However, these plots provide an initial understanding of which features might hold more predictive value and which might need to be combined with other pieces of information for enhanced predictive accuracy.
+
+
+为数值变量构建单变量预测
+
+数值变量
+```{r}
+numericVars
+```
+
+```{r}
+q1 <- quantile(train_set[,"subscribers"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varsub = cut(train_set[,"subscribers"], unique(q1))
+q2 <- quantile(train_set[,"video.views"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varvideo = cut(train_set[,"video.views"], unique(q2))
+q3 <- quantile(train_set[,"uploads"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varuploads = cut(train_set[,"uploads"], unique(q3))
+q4 <- quantile(train_set[,"created_year"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varyear = cut(train_set[,"created_year"], unique(q4))
+q5 <- quantile(train_set[,"created_month"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varmonth = cut(train_set[,"created_month"], unique(q5))
+
+q6 <- quantile(train_set[,"Gross.tertiary.education.enrollment...."], probs=seq(0, 1, 0.1), na.rm=T)  
+dis.Varedu = cut(train_set[,"Gross.tertiary.education.enrollment...."], unique(q6))
+q7 <- quantile(train_set[,"Population"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varpop = cut(train_set[,"Population"], unique(q7))
+q8 <- quantile(train_set[,"Unemployment.rate"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varrate = cut(train_set[,"Unemployment.rate"], unique(q8))
+q9 <- quantile(train_set[,"Urban_population"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varurban = cut(train_set[,"Urban_population"], unique(q9))
+q10 <- quantile(train_set[,"Latitude"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varla = cut(train_set[,"Latitude"], unique(q10))
+q11 <- quantile(train_set[,"Longitude"], probs=seq(0, 1, 0.1), na.rm=T)
+dis.Varlo = cut(train_set[,"Longitude"], unique(q11))
+```
+
+```{r}
+mkPredN <- function(outCol,varCol,appCol) {
+  cuts <- unique(as.numeric(quantile(varCol, probs=seq(0, 1, 0.1), na.rm=T)))
+  varC <- cut(varCol, cuts)
+  appC <- cut(appCol, cuts)
+  mkPredC(outCol, varC, appC)
+}
+```
+
+```{r}
+betnumericVars = c()
+for(v in numericVars) {
+  pred_var<-paste('pred',v,sep='')
+  train_set[,pred_var] <- mkPredN(train_set[,outcome], train_set[,v], train_set[,v])
+  test_set[,pred_var] <- mkPredN(train_set[,outcome], train_set[,v], test_set[,v])
+  calibration_set[,pred_var] <- mkPredN(train_set[,outcome], train_set[,v], calibration_set[,v])
+  aucTrain <- calcAUC(train_set[,pred_var],train_set[,outcome])
+  
+  if(aucTrain>=0.54) {
+    aucCal<-calcAUC(calibration_set[,pred_var],calibration_set[,outcome])
+    print(sprintf(
+      "%s, trainAUC: %4.3f calibrationAUC: %4.3f",
+      pred_var,aucTrain,aucCal))
+    betnumericVars = c(betnumericVars, v)
+  }
+}
+```
+## 10-fold Cross-Validation
+```{r}
+for (var in betnumericVars) {
+aucs <- rep(0,10)
+for (rep in 1:length(aucs)) {
+useForCalRep <- rbinom(n=nrow(trainingSet), size=1, prob=0.1) > 0
+predRep <- mkPredN(trainingSet[!useForCalRep, outcome],
+trainingSet[!useForCalRep, var],
+trainingSet[useForCalRep, var])
+aucs[rep] <- calcAUC(predRep, trainingSet[useForCalRep, outcome])
+}
+print(sprintf("%s: mean: %4.3f; sd: %4.3f", var, mean(aucs), sd(aucs)))
+}
+
+```
+
+## double density plot
+```{r}
+fig4 <- ggplot(calibration_set) + geom_density(aes(x=predsubscribers, color=as.factor(earning_category)))
+fig5 <- ggplot(calibration_set) + geom_density(aes(x=predvideo.views, color=as.factor(earning_category)))
+fig6 <- ggplot(calibration_set) + geom_density(aes(x=preduploads, color=as.factor(earning_category)))
+fig7 <- ggplot(calibration_set) + geom_density(aes(x=predcreated_year, color=as.factor(earning_category)))
+fig8 <- ggplot(calibration_set) + geom_density(aes(x=predcreated_month, color=as.factor(earning_category)))
+fig9 <- ggplot(calibration_set) + geom_density(aes(x=predGross.tertiary.education.enrollment...., color=as.factor(earning_category)))
+grid.arrange(fig4,fig5,fig6,fig7,fig8,fig9,ncol=1)
+```
+```{r}
+fig10 <- ggplot(calibration_set) + geom_density(aes(x=predPopulation, color=as.factor(earning_category)))
+fig11 <- ggplot(calibration_set) + geom_density(aes(x=predUnemployment.rate, color=as.factor(earning_category)))
+fig12 <- ggplot(calibration_set) + geom_density(aes(x=predUrban_population, color=as.factor(earning_category)))
+fig13 <- ggplot(calibration_set) + geom_density(aes(x=predLatitude, color=as.factor(earning_category)))
+fig14 <- ggplot(calibration_set) + geom_density(aes(x=predLongitude, color=as.factor(earning_category)))
+grid.arrange(fig10,fig11,fig12,fig13,fig14,ncol=1)
+```
+（分析）
+
+## Feature Selection using log Likelihood:
+```{r}
+logLikelihood <- function(ytrue, ypred, epsilon=1e-6) {
+sum(ifelse(ytrue==pos, log(ypred+epsilon), log(1-ypred-epsilon)), na.rm=T)
+}
+outcome <- 'earning_category'
+logNull <- logLikelihood(
+calibration_set[,outcome], sum(calibration_set[,outcome]==pos)/nrow(calibration_set)
+)
+cat(logNull)
+```
+
+```{r}
+selCatVars <- c()
+minDrop <- 5
+for (v in catVars) {
+  pi <- paste('pred', v, sep='')
+  devDrop <- 2*(logLikelihood(calibration_set[,outcome], calibration_set[,pi]) - logNull)
+  if (devDrop >= minDrop) {
+    print(sprintf("%s, deviance reduction: %g", pi, devDrop))
+    selCatVars <- c(selCatVars, pi)
+  }
+}
+```
+(分析)
+Similarly for the numerical variables
+```{r}
+selNumVars <- c()
+minDrop <- 5
+for (v in numericVars) {
+  pi <- paste('pred', v, sep='')
+  devDrop <- 2*(logLikelihood(calibration_set[,outcome], calibration_set[,pi]) - logNull)
+  if (devDrop >= minDrop) {
+    print(sprintf("%s, deviance reduction: %g", pi, devDrop))
+    selNumVars <- c(selNumVars, pi)
+  }
+}
+```
+查看分类变量和数值变量，我们可以发现只有这些特征变量
+
+```{r}
+selVars = c(selCatVars, selNumVars)
+selVars
+```
+
+## Multivariate models
+## Decision Tree
+
+```{r}
+tVars <- paste('pred', c(catVars, numericVars), sep='')
+(fV <- paste(outcome,'> 0 ~ ',
+paste(tVars, collapse=' + '), sep=''))
+tmodel <- rpart(fV, data = train_set)
+
+#To inspect the model, type: summary(tmodel)
+print(calcAUC(predict(tmodel, newdata=train_set), train_set[,outcome]))
+print(calcAUC(predict(tmodel, newdata=test_set), test_set[,outcome]))
+print(calcAUC(predict(tmodel, newdata=calibration_set), calibration_set[,outcome]))
+```
+## Performance Measures
+The following displays the performance measurs in terms of accuracy, precision, recall and f1 score.
+```{r}
+logLikelihood <- function(ytrue, ypred, epsilon=1e-6) {
+sum(ifelse(ytrue, log(ypred+epsilon), log(1-ypred+epsilon)), na.rm=T)
+}
+
+performanceMeasures <- function(ytrue, ypred, model.name = "model", threshold=0.5) {
+
+dev.norm <- -2 * logLikelihood(ytrue, ypred)/length(ypred)
+
+cmat <- table(actual = ytrue, predicted = ypred >= threshold)
+accuracy <- sum(diag(cmat)) / sum(cmat)
+precision <- cmat[2, 2] / sum(cmat[, 2])
+recall <- cmat[2, 2] / sum(cmat[2, ])
+f1 <- 2 * precision * recall / (precision + recall)
+data.frame(model = model.name, precision = precision,
+recall = recall, f1 = f1, dev.norm = dev.norm)
+}
+
+```
+## Pander formatting
+```{r}
+panderOpt <- function(){
+library(pander)
+# setting up Pander Options
+panderOptions("plain.ascii", TRUE)
+panderOptions("keep.trailing.zeros", TRUE)
+panderOptions("table.style", "simple")
+}
+```
+prettier performance table function
+```{r}
+pp_table = function(model, xtrain, ytrain, xtest, ytest, xcal, ycal, threshold=0.5){
+  panderOpt()
+  perf_justify = 'lrrrrr'
+  
+  pred_train = predict(model, newdata = xtrain)
+  pred_test = predict(model, newdata = xtest)
+  pred_cal = predict(model, newdata = xcal)
+  
+  train_df = performanceMeasures(ytrain,pred_train, model.name = 'training', threshold=threshold)
+  cal_df = performanceMeasures(ycal,pred_cal, model.name = 'calibration', threshold=threshold)
+  test_df = performanceMeasures(ytest,pred_test, model.name = 'test', threshold=threshold)
+  
+  perftable <- rbind(train_df, cal_df, test_df)
+  pandoc.table(perftable)
+}
+```
+
+print a performance table
+
+```{r}
+pp_table(tmodel, train_set[tVars],train_set[,outcome]==pos,test_set[tVars],test_set[,outcome]==pos, calibration_set[tVars],calibration_set[,outcome]==pos)
+```
+plotting the AUC
+```{r}
+library(ROCit)
+plot_roc <- function(predcoltrain, outcoltrain, predcolcal, outcolcal,predcoltest, outcoltest){
+roc_train <- rocit(score=predcoltrain, class=outcoltrain==pos)
+roc_cal <- rocit(score=predcolcal, class=outcolcal==pos)
+roc_test <- rocit(score=predcoltest,class=outcoltest==pos)
+
+plot(roc_train, col = c("blue","green"), lwd = 3, legend = FALSE,YIndex = FALSE, values = TRUE, asp=1)
+lines(roc_cal$TPR ~ roc_cal$FPR, lwd = 3, col = c("red","green"), asp=1)
+lines(roc_test$TPR ~ roc_test$FPR, lwd = 3, col = c("purple","green"), asp=1)
+legend("bottomright", col = c("blue","red", "purple"),
+c("Training", "Calibration", "Test"), lwd = 2)
+}
+pred_test_roc <- predict(tmodel, newdata=test_set)
+pred_train_roc <- predict(tmodel, newdata=train_set)
+pred_cal_roc <- predict(tmodel, newdata = calibration_set)
+
+plot_roc(
+  pred_train_roc, train_set[[outcome]], pred_cal_roc, calibration_set[[outcome]], pred_test_roc, test_set[[outcome]])
+```
+## Using selected features
+```{r}
+selVars
+f <- paste(outcome,'>0 ~ ',
+paste(selVars, collapse=' + '), sep='')
+tmodel2 <- rpart(f, data=train_set)
+print(calcAUC(predict(tmodel2, newdata=train_set[selVars]), train_set[,outcome]))
+
+print(calcAUC(predict(tmodel2, newdata=test_set[selVars]), test_set[,outcome]))
+
+print(calcAUC(predict(tmodel2, newdata=calibration_set[selVars]), calibration_set[,outcome]))
+
+```
+print a performance table
+```{r}
+pp_table(tmodel2, train_set[tVars],train_set[,outcome]==pos,test_set[tVars],test_set[,outcome]==pos,calibration_set[tVars],calibration_set[,outcome]==pos)
+```
+
+Visualising a decision tree
+```{r}
+par(cex=0.5)
+plot(tmodel2)
+text(tmodel2)
+```
+
+Plotting the ROC
+```{r}
+pred_test_roc2 <- predict(tmodel2, newdata=test_set)
+pred_train_roc2 <- predict(tmodel2, newdata=train_set)
+pred_cal_roc2 <- predict(tmodel2, newdata = calibration_set)
+
+plot_roc(
+  pred_train_roc2, train_set[[outcome]], pred_cal_roc2, calibration_set[[outcome]], pred_test_roc2, test_set[[outcome]])
+```
+
+## Classification Models (Logistic Regression model)
+```{r}
+# 拟合逻辑回归模型
+formula <- paste(outcome, '> 0 ~ ', paste(selVars, collapse=' + '), sep='')
+```
+
+```{r}
+model_logr <- glm(formula=formula, data=train_set, family=binomial(link="logit"))
+## Warning: glm.fit: algorithm did not converge
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+train_set$pred <- predict(model_logr, newdata=train_set, type="response")
+test_set$pred <- predict(model_logr, newdata=test_set, type="response")
+calibration_set$pred <- predict(model_logr, newdata=calibration_set, type="response")
+```
+
+Evaluate Performance
+```{r}
+# 计算训练集的性能指标
+train_performance <- performanceMeasures(train_set[, outcome], train_set$pred, model.name = 'training', threshold = 0.5)
+
+# 计算测试集的性能指标
+test_performance <- performanceMeasures(test_set[, outcome], test_set$pred, model.name = 'test', threshold = 0.5)
+
+cal_performance <- performanceMeasures(calibration_set[, outcome], calibration_set$pred, model.name = 'calibration', threshold = 0.5)
+
+# 创建性能汇总表
+performance_table <- rbind(train_performance, cal_performance, test_performance)
+
+# 显示性能汇总表
+pandoc.table(performance_table)
+
+```
+## Plotting the AUC(Logistic Regression model)
+```{r}
+plot_roc(
+  train_set$pred, train_set[[outcome]], calibration_set$pred, calibration_set[[outcome]], test_set$pred, test_set[[outcome]])
+```
+## LIME for the Logistic Regression Model:
+```{r}
+library(lime)
+explainer <- lime(train_set[selVars], model = model_logr, 
+                  bin_continuous = TRUE, n_bins = 10)
+
+model_type.glm <- function(x){
+  return("regression") # for regression problem
+}
+
+predict_model.glm <- function(x, newdata, type = "response") {
+
+    # return prediction value
+    predict(x, newdata) %>% as.data.frame()
+    
+}
+cases <- c(1,2,18,30)
+(example <- test_set[cases,selVars])
+explanation <- lime::explain(example, explainer,dist_fun = "manhattan",
+                       kernel_width = 2, n_labels = 1, n_features = 4)
+plot_features(explanation = explanation)
+```
+
+## Feature selection using Fisher Score
+```{r}
+# 计算Fisher's Score
+calculate_fisher_score <- function(feature, outcome) {
+  positive_values <- feature[outcome == 1]
+  negative_values <- feature[outcome == 0]
+  
+  # 检查正例和负例子集是否为空
+  if (length(positive_values) == 0 || length(negative_values) == 0) {
+    return(0)  # 返回0或其他合适的值，表示特征不相关
+  }
+  
+  mean_positive <- mean(positive_values)
+  mean_negative <- mean(negative_values)
+  var_positive <- var(positive_values)
+  var_negative <- var(negative_values)
+  
+  # 检查方差是否为零，避免分母为零
+  if (var_positive == 0 || var_negative == 0) {
+    return(0)  # 返回0或其他合适的值，表示特征不相关
+  }
+  
+  fisher_score <- ((mean_positive - mean_negative)^2) / (var_positive + var_negative)
+  return(fisher_score)
+}
+
+# 选择特征列
+features <- youtube[, c("subscribers", "video.views", "uploads", "created_year", "created_month", "Gross.tertiary.education.enrollment....", "Population", "Unemployment.rate", "Urban_population", "Latitude", "Longitude","earning_category")]
+
+# 对因子列进行独热编码
+categorical_features <- youtube[, c("category", "Country", "channel_type")]
+encoded_features <- model.matrix(~ . - 1, data = categorical_features)
+
+# 合并数值列和独热编码后的因子列
+all_features <- cbind(features, encoded_features)
+
+# 计算每个特征的Fisher's Score
+fisher_scores <- sapply(all_features, calculate_fisher_score, outcome = outcome)
+
+# 按照Fisher's Score进行降序排序
+sorted_features <- names(sort(fisher_scores, decreasing = TRUE))
+
+# 选择前N个特征作为最相关的特征
+N <- 5  # 选择前5个特征
+selected_features <- sorted_features[1:N]
+
+# 输出选择的特征
+print(selected_features)
+
+
+```
+##Decision Tree 
+```{r}
+fVars <- paste('pred', selected_features, sep='')
+(fV <- paste(outcome,'> 0 ~ ',
+paste(fVars, collapse=' + '), sep=''))
+tmodel3 <- rpart(fV, data = train_set)
+
+#To inspect the model, type: summary(tmodel)
+print(calcAUC(predict(tmodel3, newdata=train_set), train_set[,outcome]))
+print(calcAUC(predict(tmodel3, newdata=test_set), test_set[,outcome]))
+print(calcAUC(predict(tmodel3, newdata=calibration_set), calibration_set[,outcome]))
+```
+print a performance table
+```{r}
+pp_table(tmodel3, train_set[fVars],train_set[,outcome]==pos,test_set[fVars],test_set[,outcome]==pos,calibration_set[tVars],calibration_set[,outcome]==pos)
+```
+Visualising a decision tree
+```{r}
+par(cex=0.5)
+plot(tmodel)
+text(tmodel)
+```
+Plotting the AUC
+```{r}
+pred_test_roc3 <- predict(tmodel3, newdata=test_set)
+pred_train_roc3 <- predict(tmodel3, newdata=train_set)
+pred_cal_roc3 <- predict(tmodel3, newdata = calibration_set)
+
+plot_roc(
+  pred_train_roc3, train_set[[outcome]], pred_cal_roc3, calibration_set[[outcome]], pred_test_roc3, test_set[[outcome]])
+```
+
+
+## Logistic Regression model
+```{r}
+formula <- paste(outcome, '> 0 ~ ', paste(selected_features, collapse=' + '), sep='')
+
+model_logr <- glm(formula=formula, data=train_set, family=binomial(link="logit"))
+## Warning: glm.fit: algorithm did not converge
+## Warning: glm.fit: fitted probabilities numerically 0 or 1 occurred
+train_set$pred2 <- predict(model_logr, newdata=train_set, type="response")
+test_set$pred2 <- predict(model_logr, newdata=test_set, type="response")
+calibration_set$pred2 <- predict(model_logr, newdata=calibration_set, type="response")
+
+# 计算训练集的性能指标
+train_performance2 <- performanceMeasures(train_set[, outcome], train_set$pred2, model.name = 'training', threshold = 0.5)
+
+# 计算测试集的性能指标
+test_performance2 <- performanceMeasures(test_set[, outcome], test_set$pred2, model.name = 'test', threshold = 0.5)
+
+cal_performance2 <- performanceMeasures(calibration_set[, outcome], calibration_set$pred2, model.name = 'calibration', threshold = 0.5)
+
+
+# 创建性能汇总表
+performance_table2 <- rbind(train_performance2, cal_performance2, test_performance2)
+
+# 显示性能汇总表
+pandoc.table(performance_table2)
+```
+Plotting the AUC
+```{r}
+plot_roc(
+  train_set$pred2, train_set[[outcome]], calibration_set$pred2, calibration_set[[outcome]], test_set$pred2, test_set[[outcome]])
+```
+## LIME for the Logistic Regression Model:
+```{r}
+library(lime)
+explainer <- lime(train_set[selected_features], model = model_logr, 
+                  bin_continuous = TRUE, n_bins = 10)
+
+model_type.glm <- function(x){
+  return("regression") # for regression problem
+}
+
+predict_model.glm <- function(x, newdata, type = "response") {
+
+    # return prediction value
+    predict(x, newdata) %>% as.data.frame()
+    
+}
+cases <- c(1,2,18,30)
+(example <- test_set[cases,selected_features])
+explanation <- lime::explain(example, explainer,dist_fun = "manhattan",
+                       kernel_width = 2, n_labels = 1, n_features = 4)
+plot_features(explanation = explanation)
+```
+
+
+## Model Comparision
+In this section, we compare different models for different selected features by comparing the accuracy, precision, recall, f1 and dev,norm.
+```{r}
+pp_table(tmodel2, train_set[tVars],train_set[,outcome]==pos,test_set[tVars],test_set[,outcome]==pos,calibration_set[tVars],calibration_set[,outcome]==pos)
+```
+
+```{r}
+pandoc.table(performance_table)
+```
+
+```{r}
+pp_table(tmodel3, train_set[tVars],train_set[,outcome]==pos,test_set[tVars],test_set[,outcome]==pos,calibration_set[tVars],calibration_set[,outcome]==pos)
+```
+
+```{r}
+pandoc.table(performance_table2)
+```
+```{r}
+# 设置图形布局，创建一个2x1的图形设备
+par(mfrow = c(2, 2))
+
+# 第一个绘图：ROC曲线对比
+plot_roc(pred_train_roc2, train_set[[outcome]], pred_cal_roc2, calibration_set[[outcome]], pred_test_roc2, test_set[[outcome]])
+plot_roc(
+  train_set$pred, train_set[[outcome]], calibration_set$pred, calibration_set[[outcome]], test_set$pred, test_set[[outcome]])
+plot_roc(
+  pred_train_roc3, train_set[[outcome]], pred_cal_roc3, calibration_set[[outcome]], pred_test_roc3, test_set[[outcome]])
+plot_roc(
+  train_set$pred2, train_set[[outcome]], calibration_set$pred2, calibration_set[[outcome]], test_set$pred2, test_set[[outcome]])
+
+```
+
+# Section3: Clustering
+Make clustering more coordinate-free
+```{r}
+library(scales)
+selected_features_df <- youtube[, selected_features]
+scaled_df <- scale(selected_features_df)
+
+```
+
+## Finding k
+```{r}
+# Function to return the squared Euclidean distance of two given points x and y
+sqr_euDist <- function(x, y) {
+sum((x - y)^2)
+}
+# Function to calculate WSS of a cluster, represented as a n-by-d matrix
+# (where n and d are the numbers of rows and columns of the matrix)
+# which contains only points of the cluster.
+wss <- function(clustermat) {
+c0 <- colMeans(clustermat)
+sum(apply( clustermat, 1, FUN=function(row) {sqr_euDist(row, c0)} ))
+}
+# Function to calculate the total WSS. Argument `scaled_df`: data frame
+# with normalised numerical columns. Argument `labels`: vector containing
+# the cluster ID (starting at 1) for each row of the data frame.
+wss_total <- function(scaled_df, labels) {
+wss.sum <- 0
+k <- length(unique(labels))
+for (i in 1:k)
+wss.sum <- wss.sum + wss(subset(scaled_df, labels == i))
+wss.sum
+}
+
+# Function to calculate total sum of squared (TSS) distance of data
+# points about the (global) mean. This is the same as WSS when the
+# number of clusters (k) is 1.
+tss <- function(scaled_df) {
+wss(scaled_df)
+}
+
+# Function to return the CH indices computed using hierarchical
+# clustering (function `hclust`) or k-means clustering (`kmeans`)
+# for a vector of k values ranging from 1 to kmax.
+CH_index <- function(scaled_df, kmax, method="kmeans") {
+if (!(method %in% c("kmeans", "hclust")))
+stop("method must be one of c('kmeans', 'hclust')")
+npts <- nrow(scaled_df)
+wss.value <- numeric(kmax) # create a vector of numeric type
+# wss.value[1] stores the WSS value for k=1 (when all the
+# data points form 1 large cluster).
+wss.value[1] <- wss(scaled_df)
+if (method == "kmeans") {
+# kmeans
+for (k in 2:kmax) {
+clustering <- kmeans(scaled_df, k, nstart=10, iter.max=100)
+wss.value[k] <- clustering$tot.withinss
+}
+} else {
+# hclust
+d <- dist(scaled_df, method="euclidean")
+pfit <- hclust(d, method="ward.D2")
+for (k in 2:kmax) {
+labels <- cutree(pfit, k=k)
+wss.value[k] <- wss_total(scaled_df, labels)
+}
+}
+bss.value <- tss(scaled_df) - wss.value # this is a vector
+B <- bss.value / (0:(kmax-1)) # also a vector
+W <- wss.value / (npts - 1:kmax) # also a vector
+data.frame(k = 1:kmax, CH_index = B/W, WSS = wss.value)
+}
+```
+
+Plot the CH and WSS index
+```{r}
+library(gridExtra)
+# calculate the CH criterion
+crit.df <- CH_index(scaled_df, 10, method="hclust")
+fig1 <- ggplot(crit.df, aes(x=k, y=CH_index)) +
+geom_point() + geom_line(colour="red") +
+scale_x_continuous(breaks=1:10, labels=1:10) +
+labs(y="CH index") + theme(text=element_text(size=20))
+fig2 <- ggplot(crit.df, aes(x=k, y=WSS), color="blue") +
+geom_point() + geom_line(colour="blue") +
+scale_x_continuous(breaks=1:10, labels=1:10) +
+theme(text=element_text(size=20))
+grid.arrange(fig1, fig2, nrow=1)
+
+```
+
+## Hierarchical Clustering
+```{r}
+# 进行层次聚类
+d <- dist(scaled_df, method="euclidean")
+pfit <- hclust(d, method="ward.D2") # perform hierarchical clustering
+# To examine `pfit`, type: summary(pfit) and pfit$height
+plot(pfit)
+rect.hclust(pfit, k=6) # k=5 means we want rectangles to be put around 5 clusters
+```
+
+## Visualising Clusters - Data preparation
+```{r}
+groups <- cutree(pfit, k=6)
+
+print_clusters <- function(df, groups, cols_to_print) {
+Ngroups <- max(groups)
+for (i in 1:Ngroups) {
+print(paste("cluster", i))
+print(df[groups == i, cols_to_print])
+}
+}
+
+princ <- prcomp(scaled_df)
+nComp <- 2 
+
+project2D <- as.data.frame(predict(princ, newdata=scaled_df)[,1:nComp])
+
+hclust.project2D <- cbind(project2D, cluster=as.factor(groups), country=youtube$Country)
+head(hclust.project2D)
+```
+
+## Visualising Clusters - Finding the convex hull
+```{r}
+library('grDevices')
+find_convex_hull <- function(proj2Ddf, groups) {
+do.call(rbind,
+lapply(unique(groups),
+FUN = function(c) {
+f <- subset(proj2Ddf, cluster==c);
+f[chull(f),]
+}
+)
+)
+}
+hclust.hull <- find_convex_hull(hclust.project2D, groups)
+
+```
+
+## Visualising Clusters
+```{r}
+library(ggplot2)
+ggplot(hclust.project2D, aes(x=PC1, y=PC2)) +
+geom_point(aes(shape=cluster, color=cluster)) +
+geom_polygon(data=hclust.hull, aes(group=cluster, fill=as.factor(cluster)),
+alpha=0.4, linetype=0) + theme(text=element_text(size=20))
+```
+
+## Using clusterboot
+We use clusterboot to find out how stable the clustering algorithm is.
+```{r}
+library(fpc)
+kbest.p <- 6
+cboot.hclust <- clusterboot(scaled_df, clustermethod=hclustCBI,
+method="ward.D2", k=kbest.p)
+summary(cboot.hclust$result)
+
+```
+
+print the result of each cluster
+```{r}
+groups.cboot <- cboot.hclust$result$partition
+print_clusters(youtube, groups.cboot, "Country")
+```
+
+Finding the stable clusters
+```{r}
+(values <- 1 - cboot.hclust$bootbrd/100) # large values here => highly stable
+## [1] 0.72 0.88 0.51 0.85 0.63
+cat("So clusters", order(values)[5], "and", order(values)[4], "are highly stable")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+

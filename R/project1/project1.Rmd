@@ -1,0 +1,368 @@
+---
+title: "CITS4009 - project1"
+author: "Jiaheng GU(23925667)"
+date: "2023-08"
+output: html_document
+---
+https://youtu.be/UU-Y_RACEh4
+
+## Introduction
+
+The data set analyzed can be obtained from the Kaggle platform. It's part of the "Global YouTube Statistics 2023" challenge. <https://www.kaggle.com/datasets/nelgiriyewithana/global-youtube-statistics-2023?resource=download>
+
+This is a dataset about the statistics of the most subscribed YouTube channels, including subscriber counts, video views, upload frequency, country of origin, earnings, and more. This collection of data from YouTube giants offers valuable insights for aspiring content creators, data enthusiasts, and those curious about the evolving online content landscape.
+
+## Data loading, overview and set up
+
+Load libraries
+
+```{r,message=FALSE}
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(leaflet)
+library(leaflet.extras)
+library(forcats)
+library(scales)
+```
+
+load the data
+
+```{r}
+data.path <- 'D:/cits4009/youtube_UTF_8.csv'
+youtube <- read.csv(data.path)
+```
+
+Using str to analyse the data
+
+```{r}
+str(youtube)
+```
+
+There are 995 obs with 28 variables, including integer, character and numeric variables.Some variables have missing value "NaN". Some variables like "uploads" shows information about channel popularity and activity. Geographic variables like "Country" shows the location of the Youtubers. Economic and demographic variables like "Population" shows the information about the country.
+
+```{r}
+summary(youtube)
+```
+
+Most numeric variables, like subscribers and video.views are right-skewed, most variables have NA values.
+
+```{r}
+head(youtube)
+```
+
+This is the first six rows of the dataset. Each row represents information about a Youtuber and contains the first few columns in the dataset.
+
+## Initial data clean and transformation
+
+```{r}
+colnames(youtube)
+```
+
+Read and process the column names.
+
+```{r}
+# Process column names: Convert titles to lowercase, remove trailing dots, replace remaining dots with underscores to make the formats consistent
+# Convert column titles to lowercase
+colnames(youtube) <- tolower(colnames(youtube))
+# Remove trailing dots from column titles
+colnames(youtube) <- gsub("\\.+$", "", colnames(youtube))
+# Remove extra 'the' from column names
+colnames(youtube) <- gsub("_the_|_the$|^the_", "_", colnames(youtube), ignore.case = TRUE)
+# Replace remaining dots and blank space in column titles with underscores
+colnames(youtube) <- gsub("\\.| ", "_", colnames(youtube))
+```
+
+Replace unreasonable values with NA(e.g. Youtube was created in 2005,but there is a value 1997 in created_year column) 
+Replace all NaN and 0 in the data with NA.
+
+```{r}
+youtube_cleaned <- youtube %>%
+  mutate(created_year = ifelse(created_year <= 2005, NA, created_year)) %>%
+  mutate_all(~ ifelse(toupper(.) %in% c("0", "NAN"), NA, .))
+```
+
+Counting the missing value in the remaining variables.
+
+```{r}
+count_missing <- function(df) {
+  sapply(df, FUN = function(col) sum(is.na(col)))
+}
+nacounts <- count_missing(youtube_cleaned)
+hasNA <- which(nacounts >= 0)
+nacounts[hasNA]
+```
+
+Twenty four of these variables have NAs.If these variables are used in subsequent charts, NA needs to be cleaned and transformed.
+
+Remove NA columns greater than 12 (keep data relatively intact,keep 95% of the data).
+
+```{r}
+# Create a new column 'na_in_row' that stores the count of NA values in each row
+youtube_cleaned$na_in_row <- rowSums(is.na(youtube_cleaned))
+# Select rows with NA values greater than 12
+rows_to_keep <- youtube_cleaned$na_in_row <= 12
+# Filter the data frame to keep only rows without too many NA values
+youtube_cleaned <- youtube_cleaned[rows_to_keep, ]
+# Remove the 'na_in_row' column 
+youtube_cleaned$na_in_row <- NULL
+```
+
+## Analysing subscribers and video views relationship
+
+This is boxplot of subscribers by category.
+
+```{r}
+# Remove rows with NaN values in the 'category' column
+youtube_cleaned_boxplot <- youtube_cleaned %>%
+  filter(!is.na(category))
+# Define the remove_outliers function
+remove_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25)
+  Q3 <- quantile(x, 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  x_filtered <- replace(x, x < lower_bound | x > upper_bound, NA)
+  return(x_filtered)
+}
+# Apply the remove_outliers function to the 'subscribers' column
+youtube_cleaned_boxplot <- youtube_cleaned_boxplot %>%
+  mutate(subscribers = remove_outliers(subscribers))
+# Create the boxplot for 'subscribers'
+ggplot(data = youtube_cleaned_boxplot, aes(x = category, y = subscribers)) +
+  geom_boxplot(fill = "lightblue",na.rm = TRUE) +
+  labs(x = "Category", y = "Subscribers") +
+  ggtitle("Boxplot of Subscribers by Category") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+We can see the data distribution for subscribers of different categories, e.g. the median of Nonprofits & Activism is the highest.
+
+This is boxplot of vedio views by category.
+
+```{r}
+# Filter rows with NaN values in the 'vedio_views' column, Considering that it doesn't make sense to replace the vedio views with the average of other youtuber's vedio views, so a filtered approach is used.
+youtube_cleaned_boxplot <- youtube_cleaned %>%
+  filter(!is.na(video_views))
+
+# Apply the remove_outliers function to the 'video_views' column
+youtube_cleaned_boxplot <- youtube_cleaned_boxplot %>%
+  mutate(video_views = remove_outliers(video_views))
+
+# Remove rows with NaN values in the 'category' column again
+youtube_cleaned_boxplot <- youtube_cleaned_boxplot %>%
+  filter(!is.na(category))
+
+# Create the boxplot for 'video_views'
+ggplot(data = youtube_cleaned_boxplot, aes(x = category, y = video_views)) +
+    geom_boxplot(fill = "lightblue",na.rm = TRUE) +
+    labs(x = "Category", y = "video_views") +
+    ggtitle("Boxplot of Video Views by Category") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+We can see the data distribution for vedio views of different categories, e.g. the median of trailers is the highest.
+
+By initially comparing the distributions of the two boxplots, we estimate that subscribers and vedio views are positively correlated, and we draw a scatterplot of the two below to validate our analysis.
+
+```{r}
+# Handle missing and non-finite values, the reason is it doesn't make sense to replace the vedio views and subscribers with the average of other youtuber's vedio views and subscribers.
+youtube_cleaned_boxplot <- youtube_cleaned_boxplot %>%
+  filter(!is.na(subscribers) & !is.na(video_views) &
+         is.finite(subscribers) & is.finite(video_views))
+
+# Create scatter plot of subscribers and video views
+ggplot(youtube_cleaned_boxplot, aes(x = subscribers, y = video_views)) +
+  labs(x = "Subscribers", y = "Video views") +
+  ggtitle("Scatter Plot of Subscribers and Video views") +
+  geom_point(alpha = 0.7, na.rm = TRUE) +
+  geom_smooth(method = "loess", se = FALSE, color = "red", na.rm = TRUE) +
+  xlim(0, 1.0e+08) +
+  ylim(0, 3e+10)
+
+```
+
+From the scatterplot, we can see that subscribers and vedio views are basically positively correlated but there isn't a strong linear relationship.
+
+## Category and Country
+
+```{r}
+# Set the longitude and latitude limits for filtering
+lon_limit <- c(-180, 180)
+lat_limit <- c(-90, 90)
+
+# Filter data based on longitude and latitude limits
+filtered_data <- youtube_cleaned %>%
+  filter(longitude >= lon_limit[1] & longitude <= lon_limit[2] &
+           latitude >= lat_limit[1] & latitude <= lat_limit[2])
+
+# Create a leaflet map
+heatmap_map <- leaflet(filtered_data) %>%
+  addProviderTiles("Stamen.TonerLite") %>%  # Add a map tile provider
+  addHeatmap(lng = ~longitude, lat = ~latitude, intensity = 1, radius = 10)  # Add heatmap layer
+
+heatmap_map
+```
+
+Plot a map, The map shows the main distribution of youtubers, we can see that youtubers are less in Africa. To clearly shows how many the youtubers in different country, we need to plot horizontal bar charts.
+
+```{r}
+youtube_stats <- youtube_cleaned %>%
+  na.omit() %>% # NA does not participate in rankings
+  group_by(country) %>%
+  summarise(youtuber_count = n())
+
+
+# Arrange countries by YouTuber count in descending order and select the top 10
+youtube_stats <- youtube_stats %>%
+  arrange(desc(youtuber_count)) %>%
+  head(10)
+
+ggplot(youtube_stats, aes(x = fct_reorder(country, youtuber_count), y = youtuber_count)) +
+  geom_bar(stat = "identity", fill = "gray") +
+  geom_text(aes(label = comma(youtuber_count)), position = position_stack(vjust = 0.5), size = 4) +
+  ggtitle("Top 10 YouTuber Counts By Country") +
+  coord_flip() +
+  labs(x = "Country", y = "Number Of Youtuber") +  
+  theme(axis.text.y = element_text(size = rel(1.2)))
+
+
+```
+
+We can see most youtubers are in US and India, but to further study the categories of youtubers in different countries, you need to draw heat maps to show the frequency distribution of the categories.
+
+```{r}
+category_country_table <- table(youtube_cleaned$category, youtube_cleaned$country)
+category_country_df <- as.data.frame(category_country_table)
+
+# Get unique country names from the dataset
+unique_countries <- unique(category_country_df$Var2)
+# Define the number of countries in each subset
+subset_size <- ceiling(length(unique_countries) / 2)
+# Split the unique country names into two subsets,because of the large volume of countries
+countries_subset1 <- unique_countries[1:subset_size]
+countries_subset2 <- unique_countries[(subset_size + 1):length(unique_countries)]
+# Filter data for each subset
+category_country_df1 <- category_country_df[category_country_df$Var2 %in% countries_subset1, ]
+category_country_df2 <- category_country_df[category_country_df$Var2 %in% countries_subset2, ]
+# Create heatmaps dynamically
+heatmap1 <- ggplot(category_country_df1, aes(x = Var1, y = Var2, fill = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue", limits = c(0, 60),breaks = seq(0, 60, by = 20)) +
+  labs(x = "Category", y = "Country", fill = "Frequency") +
+  ggtitle("Heatmap of Country by Category (Subset 1)") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8), 
+    axis.title.x = element_text(size = 10), 
+    axis.title.y = element_text(size = 10),  
+  )
+heatmap1
+
+```
+
+```{r}
+heatmap2 <- ggplot(category_country_df2, aes(x = Var1, y = Var2, fill = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "Category", y = "Country", fill = "Frequency") +
+  ggtitle("Heatmap of Country by Category (Subset 2)") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8), 
+    axis.title.x = element_text(size = 10), 
+    axis.title.y = element_text(size = 10),  
+  )
+heatmap2
+```
+
+We can see the popularity of each category in the country, e.g. Music and entertainment in US are more popular than other categories, News & Politics in US are less popular than other categories.
+
+shiny APP code:
+```{r}
+library(shiny)
+library(tidyverse)
+library(plotly)
+
+
+ui <- fluidPage(
+  titlePanel("Data Analysis"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("plot_type", "Select Plot Type:", 
+                  choices = c("Bar Chart", "Dot Chart", "Pie Chart"))
+    ),
+    
+    mainPanel(
+      conditionalPanel(
+        condition = "input.plot_type != 'Pie Chart'",
+        selectInput("y_variable", "Select y-axis variable:", 
+                    choices = c("video_views", "video_views_for_last_30_days",
+                                "highest_monthly_earnings", "highest_yearly_earnings"))
+      ),
+      plotOutput("plot", height = "400px", width = "600px")
+    )
+  )
+)
+
+server <- function(input, output) {
+  filtered_data <- reactive({
+    youtube_cleaned %>%
+      drop_na()  # It is meaningless to participate in the rank if views or earnings equals 0
+  })
+  
+  output$plot <- renderPlot({
+    y_var <- input$y_variable
+    
+    # Calculate the occurrence count for each category
+    category_counts <- filtered_data() %>%
+      count(category)
+    
+    # Keep only categories with occurrences greater than or equal to 5(If the frequency of occurrence is too low, it is not representative)
+    valid_categories <- category_counts %>%
+      filter(n >= 5) %>%
+      pull(category)
+    
+    # # Filter the data based on the selected category filter(for bar and dot chart)
+    filtered_data <- filtered_data() %>%
+      filter(category %in% valid_categories)
+    
+    if (input$plot_type == "Bar Chart" || input$plot_type == "Dot Chart") {
+      avg_values <- filtered_data %>%
+        group_by(category) %>%
+        summarize(avg_value = mean(.data[[y_var]], na.rm = TRUE))
+      
+      if (input$plot_type == "Bar Chart") {
+        ggplot(avg_values, aes(x = category, y = avg_value, fill = category)) +
+          geom_bar(stat = "identity", position = "dodge") +
+          labs(x = "Category", y = y_var) +
+          ggtitle("Bar Chart (Average Values)") +
+          theme_minimal() +
+          theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 14),
+                axis.text.y = element_text(size = 14))
+      } else if (input$plot_type == "Dot Chart") {
+        ggplot(filtered_data, aes(x = category, y = .data[[y_var]], color = category)) +
+          geom_point() +
+          labs(x = "Category", y = y_var) +
+          ggtitle("Dot Chart") +
+          theme_minimal() +
+          theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 14),
+                axis.text.y = element_text(size = 14))
+      }
+    } else if (input$plot_type == "Pie Chart") {
+      data <- filtered_data() %>%
+        group_by(category) %>%
+        summarize(total = sum(.data[[y_var]], na.rm = TRUE))
+      
+      plot_ly(data, labels = ~category, values = ~total, type = 'pie') %>%
+        layout(title = "Pie Chart")
+    }
+  })
+}
+
+shinyApp(ui, server)
+```
+
